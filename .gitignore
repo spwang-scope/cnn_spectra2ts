@@ -1,0 +1,10 @@
+*.npy
+dataset.py
+print_predictions.py
+__pycache__
+data/
+*/
+*.txt
+*.sh
+*.err
+*.out
