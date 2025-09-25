@@ -62,7 +62,7 @@ def parse_arguments():
                        help="Dimension for QKV vectors in decoder cross-attention")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
-    parser.add_argument("--d_model", type=int, default=768,
+    parser.add_argument("--d_model", type=int, default=512,
                        help="Hidden dimension for transformer decoder")
     parser.add_argument("--n_heads", type=int, default=8,
                        help="Number of attention heads")
@@ -87,7 +87,7 @@ def parse_arguments():
     parser.add_argument("--scheduler", type=str, default="cosine",
                        choices=["cosine", "step", "linear"],
                        help="Learning rate scheduler")
-    parser.add_argument("--patience", type=int, default=50,
+    parser.add_argument("--patience", type=int, default=30,
                        help="Patience for early stopping")
     parser.add_argument("--max_train_iter", type=int, default=10000,
                        help="break training when hit max of training iteration")
@@ -158,7 +158,7 @@ def get_device(args) -> torch.device:
     if hasattr(args, 'device') and hasattr(args, 'cuda_num'):
         print(f"Setting up device mapping for: {args.cuda_num}")
         mapper = CUDADeviceMapper()
-        mapper.print_mapping()  # Show the mapping
+        #mapper.print_mapping()  # Show the mapping
         device = mapper.set_device_from_config(args.cuda_num)
         args.device = device
         print(f"Device mapping complete. Using: {device}")
@@ -172,7 +172,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     """Create optimizer and learning rate scheduler."""
     # Different learning rates for different components
     param_groups = [
-        {"params": model.vit_encoder.parameters(), "lr": args.learning_rate},
+        {"params": model.my_resnet.parameters(), "lr": args.learning_rate},
         # {"params": model.domain_bridge.parameters(), "lr": args.learning_rate},
         {"params": model.ts_decoder.parameters(), "lr": 0.1*args.learning_rate},
     ]
@@ -182,7 +182,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     # Learning rate scheduler
     if args.scheduler == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.train_epochs, eta_min=1e-6
+            optimizer, T_max=args.train_epochs, eta_min=args.learning_rate * 0.01
         )
     elif args.scheduler == "step":
         scheduler = optim.lr_scheduler.StepLR(
@@ -233,39 +233,6 @@ def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel,
         
         checkpoint = torch.load(filepath, map_location='cpu')
         model_state = checkpoint['model_state_dict']
-        
-        # Check if checkpoint has old fixed positional encoding
-        pos_encoding_keys = [k for k in model_state.keys() if k.startswith('ts_decoder.pos_encoding.')]
-        has_fixed_pe = any('pe' in key for key in pos_encoding_keys)  # Check for 'pe' buffer
-        
-        if has_fixed_pe:
-            # Extract prediction length from checkpoint's positional encoding shape
-            pe_key = 'ts_decoder.pos_encoding.pe'
-            if pe_key in model_state:
-                checkpoint_pe_shape = model_state[pe_key].shape
-                checkpoint_prediction_length = checkpoint_pe_shape[1] - 1  # Subtract 1 for start token
-                
-                if logger:
-                    logger.info(f'Checkpoint has fixed PositionalEncoding with prediction_length: {checkpoint_prediction_length}')
-                    logger.info(f'Checkpoint positional encoding shape: {checkpoint_pe_shape}')
-                    
-                    if current_pos_encoding_type == 'DecoderPositionalEncoding':
-                        logger.info('Current model uses DecoderPositionalEncoding (dynamic)')
-                        if current_prediction_length != checkpoint_prediction_length:
-                            logger.info(f'Prediction length mismatch: current={current_prediction_length}, checkpoint={checkpoint_prediction_length}')
-                            logger.info('Skipping checkpoint positional encoding parameters - using dynamic computation')
-                        else:
-                            logger.info('Prediction lengths match, but still using dynamic encoding for flexibility')
-                    
-                # Remove positional encoding parameters from checkpoint for dynamic replacement
-                for key in pos_encoding_keys:
-                    if 'pe' in key:  # Only remove the 'pe' buffer, keep other params like dropout
-                        del model_state[key]
-                        if logger:
-                            logger.info(f'Removed checkpoint parameter: {key}')
-        else:
-            if logger:
-                logger.info('Checkpoint already uses dynamic positional encoding')
         
         # Load the model state dict (strict=False only for positional encoding buffer)
         missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
@@ -326,8 +293,9 @@ def train(args):
     logger.info("Model created successfully")
 
     logger.info(f"Model architecture: {model}")
-    #logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
+    '''
     # Apply freezing if requested
     if args.freeze_vit:
         logger.info("Freezing ViT encoder...")
@@ -338,6 +306,7 @@ def train(args):
         logger.info("Freezing TimeSeries decoder...")
         model.freeze_ts_decoder(freeze=True)
         logger.info("TimeSeries decoder frozen")
+    '''
     
     # Create optimizer and scheduler
     logger.info("Creating optimizer and scheduler...")
@@ -437,6 +406,7 @@ def train(args):
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
                           checkpoint_path, logger, scaler=getattr(args, '_scaler', None), args=args)
+            args.checkpoint_path = checkpoint_path  # update for next best
         else:
             patience -= 1
             logger.info(f"No improvement in validation loss. Patience left: {patience}")
@@ -560,12 +530,13 @@ def test(args, peeking=False, model=None, epoch=None):
                 pd = np.concatenate((input_np[0, :args.seq_len, -1], pred[0, :, -1].numpy()), axis=0)
             
             # Generate visualization
-            #if peeking:
-            #    if (i % 20 == 0 and (epoch + 1) % 10 == 0):
+            if peeking:
+                if (i % 20 == 0 and (epoch + 1) % 10 == 0):
+                    pass
                     #visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
-            #else:
-            #    if (i % 10 == 0):
-                    #visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
+            else:
+                if (i % 10 == 0):
+                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
 
             total_loss.append(loss.item())
             
@@ -646,7 +617,7 @@ def vali(args, model):
     criterion = nn.MSELoss()
     # Create data loaders
     val_data, val_loader = data_provider(args, flag='val')
-    logger.info(f"Created data loaders: {len(val_loader)} vals")
+    #logger.info(f"Created data loaders: {len(val_loader)} vals")
 
     preds = []
     trues = []
@@ -817,6 +788,7 @@ def main():
     
     if args.mode == "train":
         train(args)
+        test(args)  # Final test after training
     elif args.mode == "test":
         test(args)
     elif args.mode == "inference":

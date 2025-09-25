@@ -14,7 +14,7 @@ import math
 class PatchEmbedding(nn.Module):
     """Convert image into patches and embed them."""
     
-    def __init__(self, image_height=64, image_width=96, patch_size=8, in_channels=3, embed_dim=768):
+    def __init__(self, image_height, image_width, patch_size, in_channels, embed_dim):
         super().__init__()
         self.image_height = image_height
         self.image_width = image_width
@@ -160,7 +160,7 @@ class RectangularViT(nn.Module):
         patch_size=8,
         in_channels=1,
         num_classes=1000,
-        embed_dim=768,
+        embed_dim=512,
         depth=12,
         num_heads=12,
         mlp_ratio=4,
