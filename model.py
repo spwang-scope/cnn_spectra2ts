@@ -230,8 +230,8 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         self.context_length = context_length
         self.time_series_dim = time_series_dim
         
-        # Embedding for time series values
-        self.tf_target_proj = nn.Linear(time_series_dim, d_model)
+        # Embedding from time series values to model embedding
+        self.last_seq_value_proj = nn.Linear(time_series_dim, d_model)
         
         # Dynamic positional encoding for variable prediction lengths
         self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
@@ -241,9 +241,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
 
         # Project context condition (last feature of input series) [b, seq_len] to decoder dimension [b, d_mode] for cross-attention
         self.context_condition_projection = nn.Linear(context_length, d_model)
-
-        # Learnable start token
-        self.start_token = nn.Parameter(torch.randn(1, 1, d_model))
         
         # Custom transformer decoder layers with cross-attention
         self.decoder_layers = nn.ModuleList([
@@ -272,18 +269,15 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         """
         Initialize decoder parameters with better schemes for gradient sensitivity.
         """
-        # Initialize start token with small values close to expected range
-        nn.init.normal_(self.start_token, mean=1.0, std=0.02)
         
         # Initialize value embedding layer
-        nn.init.xavier_uniform_(self.tf_target_proj.weight)
-        nn.init.constant_(self.tf_target_proj.bias, 0.0)
+        nn.init.xavier_uniform_(self.last_seq_value_proj.weight)
+        nn.init.constant_(self.last_seq_value_proj.bias, 0.0)
         
         # Initialize encoder projection
         nn.init.xavier_uniform_(self.encoder_projection.weight)
         nn.init.constant_(self.encoder_projection.bias, 0.0)
 
-        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
         
         # Initialize transformer decoder layers with scaled initialization
         for layer in self.decoder_layers:
@@ -307,7 +301,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 if i == len(self.output_projection) - 1:  # Final layer
                     # Smaller initialization for final output layer
                     nn.init.xavier_uniform_(layer.weight)
-                    nn.init.constant_(layer.bias, 0.1)
+                    nn.init.constant_(layer.bias, 0.0)
                 else:
                     nn.init.xavier_uniform_(layer.weight)
                     nn.init.constant_(layer.bias, 0.0)
@@ -381,14 +375,15 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Input: [start_token, target[0], target[1], ..., target[n-2]]
             # Output: [target[0], target[1], target[2], ..., target[n-1]]
 
+            # Project teacher forcing target to the same space of decoder_input embedding  
             decoder_input = target[:, :, -self.time_series_dim:]  # (batch_size, pred_len, time_series_dim)
-            decoder_input = self.tf_target_proj(decoder_input)  # (batch_size, pred_len, d_model)
+            decoder_input = self.last_seq_value_proj(decoder_input)  # (batch_size, pred_len, d_model)
             
-            # Use the last value of the context as the start token
+            # Use the last value of the context as the start token (also using same projection)
             last_context_value = condition[:, -1:, -self.time_series_dim:]
-            start_tokens = self.tf_target_proj(last_context_value)
+            start_token = self.last_seq_value_proj(last_context_value)
 
-            decoder_input = torch.cat([start_tokens, decoder_input[:,:-1,:]], dim=1)  # (batch_size, pred_len, ts_dim)
+            decoder_input = torch.cat([start_token, decoder_input[:,:-1,:]], dim=1)  # (batch_size, pred_len, ts_dim)
             decoder_input = self.pos_encoding(decoder_input)
 
             # Create causal mask
@@ -411,39 +406,44 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         else:
             # Inference mode: autoregressive generation
             predictions = []
-            
+
             # Use the last value of the context as the start token
-            last_context_value = condition[:, -1:, -self.time_series_dim:]  # (batch, 1, ts_dim)
-            start_token = self.tf_target_proj(last_context_value)  # Embed like training
-            current_input = start_token  # Start from context, not fixed token
-            
-            #print(f"current_input shape (before embedding): {current_input.shape}")
-            # Embed current sequence
-            #embedded = self.tf_target_proj(current_input)  # (batch_size, step, d_model)
+            last_context_value = condition[:, -1:, -self.time_series_dim:]
+            start_token = self.last_seq_value_proj(last_context_value)
+
+            # Pre-allocate sequence tensor (will be filled progressively)
+            batch_size = start_token.size(0)
+            d_model = start_token.size(2)
+            device = start_token.device
+
+            # Initialize with start token, rest will be filled during generation
+            sequence_embeddings = torch.zeros(batch_size, self.prediction_length, d_model, device=device)
+            sequence_embeddings[:, 0:1, :] = start_token
 
             for step in range(self.prediction_length):
-                #print(f"current_input shape (at step {step}): {current_input.shape}")
+                # Get current sequence (only filled portion)
+                current_length = step + 1
+                current_input = sequence_embeddings[:, :current_length, :]
+
+                # Apply PE to current sequence (automatic based on sequence length)
                 current_input = self.pos_encoding(current_input)
-                
+
                 # Create causal mask
-                tgt_len = current_input.size(1)
-                tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
-                
+                tgt_mask = self._generate_square_subsequent_mask(current_length, device)
+
                 # Pass through decoder layers
                 output = current_input
                 for layer in self.decoder_layers:
                     output = layer(output, encoder_output, tgt_mask=tgt_mask)
-                
-                next_pred_token = output[:, -1:, :]  # (batch_size, 1, d_model)
+
                 # Get prediction for next time step
-                next_pred_value = self.output_projection(next_pred_token)  # (batch_size, 1, ts_dim)
+                next_pred_value = self.output_projection(output[:, -1:, :])
                 predictions.append(next_pred_value)
-                
-                # Append prediction to input for next iteration
-                current_input = torch.cat([current_input, next_pred_token], dim=1)
-            
-            # Concatenate predictions
-            output = torch.cat(predictions, dim=1)  # (batch_size, pred_len, ts_dim)
+
+                # If not the last step, prepare next token embedding
+                if step < self.prediction_length - 1:
+                    sequence_embeddings[:, step+1:step+2, :] = self.last_seq_value_proj(next_pred_value)
+            output = torch.cat(predictions, dim=1)
 
 
         return output
