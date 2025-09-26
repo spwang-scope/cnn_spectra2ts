@@ -14,7 +14,6 @@ import numpy as np
 import math
 import sys
 import os
-from myresnet import MultiScaleResNet
 from einops.layers.torch import Rearrange
 
 # Add current directory to path for local imports
@@ -64,7 +63,7 @@ class PositionalEncoding(nn.Module):
         Args:
             x: Tensor of shape (batch_size, seq_length, d_model)
         """
-        #print(f"x shape: {x.shape}, pe shape: {self.pe[:, :x.size(1), :].shape}")
+        x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
 '''
@@ -380,7 +379,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Input: [start_token, target[0], target[1], ..., target[n-2]]
             # Output: [target[0], target[1], target[2], ..., target[n-1]]
 
-            decoder_input = decoder_input[:, :, -self.time_series_dim:]  # (batch_size, pred_len, time_series_dim)
+            decoder_input = target[:, :, -self.time_series_dim:]  # (batch_size, pred_len, time_series_dim)
             #print(f"target[:, :, -self.time_series_dim:] shape: {target[:, :, -self.time_series_dim:].shape}")
             #print(f"decoder_input shape (before embedding): {decoder_input.shape}")
             # Embed and add positional encoding
@@ -401,7 +400,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 #print(f"output shape: {output.shape}, encoder_output shape: {encoder_output.shape}")
                 #print(f"encoder_output shape: {encoder_output.shape}")
                 output = layer(output, encoder_output, tgt_mask=tgt_mask)
-                break
+                
             
             # Project to output dimension - now directly predicts target
             output = self.output_projection(output)  # (batch_size, pred_len, ts_dim)
@@ -621,7 +620,7 @@ class ViTToTimeSeriesModel(nn.Module):
             predictions = self.ts_decoder(
                 decoder_input=condition,
                 encoder_output=cnn_features,  # Pass context condition for cross-attention
-                target=None,
+                target=tf_target,
                 use_teacher_forcing=True
             )
         else:
