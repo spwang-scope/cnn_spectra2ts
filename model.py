@@ -276,12 +276,14 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         nn.init.normal_(self.start_token, mean=1.0, std=0.02)
         
         # Initialize value embedding layer
-        #nn.init.xavier_uniform_(self.tf_target_proj.weight)
-        #nn.init.constant_(self.tf_target_proj.bias, 0.0)
+        nn.init.xavier_uniform_(self.tf_target_proj.weight)
+        nn.init.constant_(self.tf_target_proj.bias, 0.0)
         
         # Initialize encoder projection
         nn.init.xavier_uniform_(self.encoder_projection.weight)
         nn.init.constant_(self.encoder_projection.bias, 0.0)
+
+        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
         
         # Initialize transformer decoder layers with scaled initialization
         for layer in self.decoder_layers:
@@ -304,7 +306,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             if isinstance(layer, nn.Linear):
                 if i == len(self.output_projection) - 1:  # Final layer
                     # Smaller initialization for final output layer
-                    nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                    nn.init.xavier_uniform_(layer.weight)
                     nn.init.constant_(layer.bias, 0.1)
                 else:
                     nn.init.xavier_uniform_(layer.weight)
@@ -353,7 +355,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
     
     def forward(
         self, 
-        decoder_input: torch.Tensor,
+        condition: torch.Tensor,
         encoder_output: torch.Tensor,
         target: Optional[torch.Tensor] = None,
         use_teacher_forcing: bool = True
@@ -370,9 +372,9 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         Returns:
             Predictions (batch_size, prediction_length, time_series_dim)
         """
-        batch_size = decoder_input.size(0)
+        batch_size = condition.size(0)
         pred_len = self.prediction_length
-        device = decoder_input.device
+        device = condition.device
         
         if use_teacher_forcing:
             # Teacher forcing: use ground truth as input, properly aligned for prediction
@@ -380,15 +382,14 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Output: [target[0], target[1], target[2], ..., target[n-1]]
 
             decoder_input = target[:, :, -self.time_series_dim:]  # (batch_size, pred_len, time_series_dim)
-            #print(f"target[:, :, -self.time_series_dim:] shape: {target[:, :, -self.time_series_dim:].shape}")
-            #print(f"decoder_input shape (before embedding): {decoder_input.shape}")
-            # Embed and add positional encoding
             decoder_input = self.tf_target_proj(decoder_input)  # (batch_size, pred_len, d_model)
-            decoder_input = self.pos_encoding(decoder_input)
-            #print(f"decoder_input shape (after embedding): {decoder_input.shape}")
+            
+            # Use the last value of the context as the start token
+            last_context_value = condition[:, -1:, -self.time_series_dim:]
+            start_tokens = self.tf_target_proj(last_context_value)
 
-            start_tokens = self.start_token.expand(batch_size, -1, -1)  # (batch_size, 1, d_model)
             decoder_input = torch.cat([start_tokens, decoder_input[:,:-1,:]], dim=1)  # (batch_size, pred_len, ts_dim)
+            decoder_input = self.pos_encoding(decoder_input)
 
             # Create causal mask
             tgt_len = decoder_input.size(1)
@@ -411,16 +412,18 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Inference mode: autoregressive generation
             predictions = []
             
-            # Start with start token
-            current_input = self.start_token.expand(batch_size, pred_len, -1)
+            # Use the last value of the context as the start token
+            last_context_value = condition[:, -1:, -self.time_series_dim:]  # (batch, 1, ts_dim)
+            start_token = self.tf_target_proj(last_context_value)  # Embed like training
+            current_input = start_token  # Start from context, not fixed token
             
             #print(f"current_input shape (before embedding): {current_input.shape}")
             # Embed current sequence
             #embedded = self.tf_target_proj(current_input)  # (batch_size, step, d_model)
-            current_input = self.pos_encoding(current_input)
 
             for step in range(self.prediction_length):
                 #print(f"current_input shape (at step {step}): {current_input.shape}")
+                current_input = self.pos_encoding(current_input)
                 
                 # Create causal mask
                 tgt_len = current_input.size(1)
@@ -618,7 +621,7 @@ class ViTToTimeSeriesModel(nn.Module):
         # Step 4: Decoder forward pass
         if mode == 'train':            
             predictions = self.ts_decoder(
-                decoder_input=condition,
+                condition=condition,
                 encoder_output=cnn_features,  # Pass context condition for cross-attention
                 target=tf_target,
                 use_teacher_forcing=True
@@ -626,7 +629,7 @@ class ViTToTimeSeriesModel(nn.Module):
         else:
             # Inference: autoregressive generation
             predictions = self.ts_decoder(
-                decoder_input=condition,
+                condition=condition,
                 encoder_output=cnn_features,  # Pass context condition for cross-attention
                 target=None,
                 use_teacher_forcing=False

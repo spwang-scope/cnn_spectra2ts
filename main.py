@@ -532,8 +532,8 @@ def test(args, peeking=False, model=None, epoch=None):
             # Generate visualization
             if peeking:
                 if (i % 20 == 0 and (epoch + 1) % 10 == 0):
-                    pass
-                    #visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
+                    #pass
+                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
             else:
                 if (i % 10 == 0):
                     visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
