@@ -60,7 +60,7 @@ def parse_arguments():
                        help="Length of context window")
     parser.add_argument("--feature_projection_dim", type=int, default=128,
                        help="Dimension for QKV vectors in decoder cross-attention")
-    parser.add_argument("--time_series_dim", type=int, default=1,
+    parser.add_argument("--num_channel_pred", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
     parser.add_argument("--d_model", type=int, default=512,
                        help="Hidden dimension for transformer decoder")
@@ -283,7 +283,7 @@ def train(args):
         prediction_length=args.pred_len,
         context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
-        time_series_dim=args.time_series_dim,
+        num_channel_pred=args.num_channel_pred,
         ts_model_dim=args.d_model,
         ts_num_heads=args.n_heads,
         ts_num_layers=args.d_layers,
@@ -350,11 +350,11 @@ def train(args):
             # Forward pass with teacher forcing (training mode)
             outputs = model(context=batch_x, tf_target=batch_y, mode='train')
 
-            # Select target feature for loss calculation based on time_series_dim
+            # Select target feature for loss calculation based on num_channel_pred
             outputs = outputs[:, :, :].to(device)
-            if hasattr(args, 'time_series_dim') and args.time_series_dim > 1:
-                # Multi-variable prediction: use last time_series_dim features
-                batch_y = batch_y[:, :args.pred_len, -args.time_series_dim:].to(device)
+            if hasattr(args, 'num_channel_pred') and args.num_channel_pred > 1:
+                # Multi-variable prediction: use last num_channel_pred features
+                batch_y = batch_y[:, :args.pred_len, -args.num_channel_pred:].to(device)
             else:
                 # Single variable prediction: use last feature only
                 batch_y = batch_y[:, :args.pred_len, -1:].to(device)
@@ -442,7 +442,7 @@ def test(args, peeking=False, model=None, epoch=None):
             prediction_length=args.pred_len,
             context_length=args.seq_len,
             feature_projection_dim=args.feature_projection_dim,
-            time_series_dim=args.time_series_dim,
+            num_channel_pred=args.num_channel_pred,
             ts_model_dim=args.d_model,
             ts_num_heads=args.n_heads,
             ts_num_layers=args.d_layers,
@@ -531,7 +531,7 @@ def test(args, peeking=False, model=None, epoch=None):
             
             # Generate visualization
             if peeking:
-                if (i % 20 == 0 and (epoch + 1) % 10 == 0):
+                if (i % 20 == 0):
                     #pass
                     visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
             else:
@@ -668,7 +668,7 @@ def inference(args):
         prediction_length=args.pred_len,
         context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
-        time_series_dim=args.time_series_dim,
+        num_channel_pred=args.num_channel_pred,
         ts_model_dim=args.d_model,
         ts_num_heads=args.n_heads,
         ts_num_layers=args.d_layers,
